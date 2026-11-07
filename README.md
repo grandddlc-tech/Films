@@ -14,7 +14,17 @@ A blood-red & black web app for learning English by watching films **30 minutes 
 
 All data is stored in your browser (localStorage). Installable as a PWA (Add to Home Screen).
 
-## Run
+## Android app (APK)
+
+Download the latest APK on your phone:
+**https://github.com/grandddlc-tech/films/releases/latest/download/FilmEnglish.apk**
+
+Every push builds a new APK with GitHub Actions (`.github/workflows/android.yml`) and publishes it as a release.
+The app is a WebView wrapper around the same web app (`android/`), plus native extras: a notification
+when the 30-minute timer ends (even with the app closed) and backups saved to the Downloads folder.
+APKs are signed with the committed key `android/app/filmenglish.jks`, so new versions install over old ones.
+
+## Run in a browser
 
 Open `index.html` through any static server, e.g.:
 

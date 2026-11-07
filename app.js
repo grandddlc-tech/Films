@@ -231,19 +231,23 @@
   }
 
   // ---------------- timer ----------------
+  const NATIVE = window.AndroidApp || null; // present inside the Android APK
+  const nativeCancel = () => { try { NATIVE?.cancelAlarm(); } catch { /* ignore */ } };
   const timerElapsed = () => state.timer.accumulated + (state.timer.running ? Date.now() - state.timer.startedAt : 0);
   function timerStart() {
     if (state.timer.running) return;
     if (state.timer.date !== todayStr()) { state.timer.accumulated = 0; state.timer.date = todayStr(); }
     state.timer.running = true; state.timer.startedAt = Date.now(); state.timer.alerted = false; save();
-    if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+    if (NATIVE) {
+      try { NATIVE.requestNotifications(); NATIVE.scheduleAlarm(Date.now() + Math.max(0, sessionLen() * 60000 - state.timer.accumulated)); } catch { /* ignore */ }
+    } else if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
     renderToday();
   }
   function timerPause() {
     if (!state.timer.running) return;
-    state.timer.accumulated = timerElapsed(); state.timer.running = false; save(); renderToday();
+    state.timer.accumulated = timerElapsed(); state.timer.running = false; save(); nativeCancel(); renderToday();
   }
-  function timerReset() { state.timer = { running: false, startedAt: 0, accumulated: 0, date: todayStr() }; save(); renderToday(); }
+  function timerReset() { nativeCancel(); state.timer = { running: false, startedAt: 0, accumulated: 0, date: todayStr() }; save(); renderToday(); }
 
   function beep() {
     try {
@@ -579,6 +583,7 @@
   }
 
   function download(name, text, type = 'application/json') {
+    if (NATIVE) { try { NATIVE.saveFile(name, text, type); } catch { toast('Could not save file'); } return; }
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name;
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
@@ -650,7 +655,7 @@
           movieId: $('#log-movie').value, minutes: Math.max(0, Number($('#log-min').value) || 0),
           words: $('#log-words').value.trim(), note: $('#log-note').value.trim(),
         };
-        if (date === todayStr()) state.timer = { running: false, startedAt: 0, accumulated: 0, date };
+        if (date === todayStr()) { nativeCancel(); state.timer = { running: false, startedAt: 0, accumulated: 0, date }; }
         save(); closeModal(); render();
         const m = movieById(state.logs[date].movieId);
         if (m && m.runtime && watchedMin(m.id) >= m.runtime && !m.done) {
@@ -705,7 +710,7 @@
   let startView = 'today';
   try { startView = sessionStorage.getItem('fe.view') || 'today'; } catch { /* ignore */ }
   showView(startView);
-  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+  if (!NATIVE && 'serviceWorker' in navigator && location.protocol.startsWith('http')) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
 })();

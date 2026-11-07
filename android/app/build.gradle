@@ -1,0 +1,62 @@
+plugins {
+    id 'com.android.application'
+}
+
+def versionNum = (System.getenv('GITHUB_RUN_NUMBER') ?: '1') as Integer
+
+// Copy the web app (repo root) into the APK assets at build time.
+def webOut = layout.buildDirectory.dir('generated/webassets')
+tasks.register('copyWebApp', Copy) {
+    from(rootProject.file('..')) {
+        include 'index.html', 'styles.css', 'app.js', 'icon.svg', 'manifest.webmanifest'
+    }
+    into webOut.map { it.dir('www') }
+}
+
+android {
+    namespace 'com.grandddlc.filmenglish'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.grandddlc.filmenglish'
+        minSdk 26
+        targetSdk 34
+        versionCode versionNum
+        versionName "1.0.${versionNum}"
+    }
+
+    signingConfigs {
+        release {
+            // Fixed key committed with the project so every new APK installs over the previous one.
+            storeFile file('filmenglish.jks')
+            storePassword 'filmenglish'
+            keyAlias 'filmenglish'
+            keyPassword 'filmenglish'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+        debug {
+            signingConfig signingConfigs.release
+        }
+    }
+
+    sourceSets {
+        main.assets.srcDirs += webOut
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+tasks.named('preBuild') { dependsOn 'copyWebApp' }
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+}

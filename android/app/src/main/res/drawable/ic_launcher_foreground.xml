@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Film frame with a play symbol, drawn in black over the blood-red background. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:strokeColor="#FF050505" android:strokeWidth="4.5"
+        android:pathData="M33,33h42v42h-42z M33,43h42 M33,65h42 M43,33v10 M54,33v10 M65,33v10 M43,65v10 M54,65v10 M65,65v10" />
+    <path android:fillColor="#FF050505" android:pathData="M50,48.5v11l9,-5.5z" />
+</vector>
