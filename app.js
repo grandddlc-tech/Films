@@ -96,10 +96,38 @@
   // ---------------- movie search ----------------
   const hiRes = (url, w = 600) => url ? url.replace(/\._V1_.*?\.jpg$/, `._V1_SX${w}.jpg`) : '';
 
-  async function fetchJSON(url, opts) {
-    const r = await fetch(url, opts);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
+  /** fetch + JSON with a time limit, so a slow or blocked site never hangs the app. */
+  async function fetchJSON(url, opts = {}, timeoutMs = 12000) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const r = await fetch(url, { ...opts, signal: ctrl.signal });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return await r.json();
+    } catch (e) {
+      throw e.name === 'AbortError' ? new Error('timed out') : e;
+    } finally { clearTimeout(timer); }
+  }
+
+  /** Facts from the Wikidata entity API (fast, same servers as Wikipedia). */
+  async function wikidataEntity(qid) {
+    if (!/^Q\d+$/.test(qid)) return {};
+    const api = 'https://www.wikidata.org/w/api.php?format=json&origin=*&action=wbgetentities';
+    const d = await fetchJSON(`${api}&ids=${qid}&props=claims`);
+    const claims = d.entities?.[qid]?.claims || {};
+    const vals = (p) => (claims[p] || []).filter((c) => c.rank !== 'deprecated').map((c) => c.mainsnak?.datavalue?.value).filter((v) => v != null);
+    const years = vals('P577').map((v) => (v.time || '').slice(1, 5)).filter((y) => /^\d{4}$/.test(y)).sort();
+    const durs = vals('P2047').map((v) => Number(v.amount)).filter((n) => n > 0);
+    const imdb = vals('P345').find((v) => typeof v === 'string' && v.startsWith('tt')) || '';
+    const countryIds = [...new Set(vals('P495').map((v) => v.id).filter(Boolean))].slice(0, 6);
+    let country = '';
+    if (countryIds.length) {
+      try {
+        const c = await fetchJSON(`${api}&ids=${countryIds.join('|')}&props=labels&languages=en`);
+        country = countryIds.map((id) => c.entities?.[id]?.labels?.en?.value).filter(Boolean).join(', ');
+      } catch { /* labels optional */ }
+    }
+    return { year: years[0] || '', runtime: durs.length ? Math.round(Math.max(...durs)) : '', imdbId: imdb, country };
   }
 
   function tmdbFetch(path, params = {}) {
@@ -241,7 +269,11 @@
     let m = { ...r };
     if (m.wikidataId || (m.imdbId && (!m.country || !m.runtime))) {
       try {
-        const w = await wikidataFacts({ qid: m.wikidataId, imdbId: m.imdbId });
+        let w = {};
+        if (m.wikidataId) { try { w = await wikidataEntity(m.wikidataId); } catch { /* fall back to SPARQL */ } }
+        if (!w.country && !w.runtime) {
+          try { w = { ...(await wikidataFacts({ qid: m.wikidataId, imdbId: m.imdbId })), ...Object.fromEntries(Object.entries(w).filter(([, v]) => v)) }; } catch { /* optional */ }
+        }
         m.country = m.country || w.country || ''; m.runtime = m.runtime || w.runtime || '';
         m.year = m.year || w.year || ''; m.imdbId = m.imdbId || w.imdbId || '';
       } catch { /* optional */ }
@@ -679,10 +711,16 @@
       case 'close': closeModal(); break;
       case 'pick': {
         const r = lastResults[Number(el.dataset.i)]; if (!r) break;
-        el.disabled = true; el.querySelector('.chip').textContent = 'Adding…';
-        const m = await enrich(r);
-        addMovie(m);
+        // Add immediately with what the search returned, then fill in country/runtime in the background.
+        const movie = addMovie(r);
         const s = $('#movie-search'); if (s) { s.value = ''; } $('#results') && ($('#results').innerHTML = '');
+        enrich(r).then((m) => {
+          const target = movieById(movie.id); if (!target) return;
+          for (const k of ['year', 'country', 'runtime', 'imdbId', 'poster', 'backdrop', 'wikiUrl']) {
+            if (m[k] && (!target[k] || k === 'backdrop' || k === 'runtime')) target[k] = k === 'runtime' ? Number(m[k]) : m[k];
+          }
+          save(); render();
+        }).catch(() => { /* details are optional; the film is already added */ });
         break;
       }
       case 'save-movie': {
