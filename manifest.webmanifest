@@ -1,0 +1,14 @@
+{
+  "name": "Film English",
+  "short_name": "FilmEnglish",
+  "description": "Watch films 30 minutes a day to learn English.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#050505",
+  "theme_color": "#0a0000",
+  "lang": "en",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
