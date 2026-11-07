@@ -149,18 +149,55 @@
     return (await fetchJSON(u, { headers: { Accept: 'application/sparql-results+json' } })).results.bindings;
   }
 
-  /** Country + runtime (+year) from Wikidata using the IMDb id. */
-  async function wikidataByImdb(imdbId) {
-    const rows = await sparql(`SELECT ?countryLabel ?dur ?date WHERE {
-      ?item wdt:P345 "${imdbId}" .
-      OPTIONAL { ?item wdt:P495 ?country . }
-      OPTIONAL { ?item wdt:P2047 ?dur . }
-      OPTIONAL { ?item wdt:P577 ?date . }
-      SERVICE wikibase:label { bd:serviceParam wikibase:language "en". } } LIMIT 50`);
+  /** Country, runtime, year and IMDb id from Wikidata, by Wikidata item id (Q…) or IMDb id (tt…). */
+  async function wikidataFacts({ qid, imdbId }) {
+    let subj, bind = '';
+    if (qid && /^Q\d+$/.test(qid)) subj = 'wd:' + qid;
+    else if (imdbId && /^tt\d+$/.test(imdbId)) { subj = '?item'; bind = `?item wdt:P345 "${imdbId}" .`; }
+    else return {};
+    const rows = await sparql(`SELECT ?countryLabel ?dur ?date ?imdb WHERE {
+      ${bind}
+      OPTIONAL { ${subj} wdt:P495 ?country . }
+      OPTIONAL { ${subj} wdt:P2047 ?dur . }
+      OPTIONAL { ${subj} wdt:P577 ?date . }
+      OPTIONAL { ${subj} wdt:P345 ?imdb . }
+      SERVICE wikibase:label { bd:serviceParam wikibase:language "en". } } LIMIT 80`);
     const countries = [...new Set(rows.map((r) => r.countryLabel?.value).filter(Boolean))];
     const durs = rows.map((r) => Number(r.dur?.value)).filter((n) => n > 0);
     const years = rows.map((r) => (r.date?.value || '').slice(0, 4)).filter(Boolean).sort();
-    return { country: countries.join(', '), runtime: durs.length ? Math.round(Math.max(...durs)) : '', year: years[0] || '' };
+    const imdb = rows.map((r) => r.imdb?.value).find((x) => x && x.startsWith('tt')) || '';
+    return { country: countries.join(', '), runtime: durs.length ? Math.round(Math.max(...durs)) : '', year: years[0] || '', imdbId: imdb };
+  }
+
+  // ---- Wikipedia (default search): title, description, infobox poster ----
+  async function wikiQuery(search) {
+    const u = new URL('https://en.wikipedia.org/w/api.php');
+    Object.entries({
+      action: 'query', format: 'json', formatversion: '2', origin: '*',
+      generator: 'search', gsrsearch: search, gsrlimit: '10', gsrnamespace: '0',
+      prop: 'pageimages|description|pageprops', piprop: 'thumbnail|original', pithumbsize: '600', pilicense: 'any',
+      ppprop: 'wikibase_item|disambiguation',
+    }).forEach(([k, v]) => u.searchParams.set(k, v));
+    const d = await fetchJSON(u);
+    return (d.query?.pages || []).filter((p) => !('disambiguation' in (p.pageprops || {}))).sort((a, b) => a.index - b.index);
+  }
+
+  async function searchWikipedia(q) {
+    let pages = await wikiQuery(`${q} hastemplate:"Infobox film"`);
+    if (!pages.length) pages = await wikiQuery(`${q} film`);
+    return pages.slice(0, 8).map((p) => {
+      const yearMatch = (p.description || '').match(/\b(18|19|20)\d{2}\b/) || p.title.match(/\((\d{4})[^)]*\)$/);
+      const img = p.thumbnail?.source || p.original?.source || '';
+      return {
+        source: 'wikipedia',
+        title: p.title.replace(/\s*\([^)]*\b(film|movie|series|miniseries)\)$/i, ''),
+        year: yearMatch ? yearMatch[0].replace(/\D/g, '').slice(0, 4) : '',
+        poster: img, backdrop: p.original?.source || img,
+        wikidataId: p.pageprops?.wikibase_item || '',
+        wikiUrl: 'https://en.wikipedia.org/wiki/' + encodeURIComponent(p.title.replace(/ /g, '_')),
+        sub: p.description || '',
+      };
+    });
   }
 
   async function searchWikidata(q) {
@@ -190,6 +227,7 @@
 
   async function searchMovies(q) {
     const errors = [];
+    try { const r = await searchWikipedia(q); if (r.length) return r; } catch (e) { errors.push('Wikipedia: ' + e.message); }
     if (state.settings.tmdbKey.trim()) {
       try { const r = await searchTMDB(q); if (r.length) return r; } catch (e) { errors.push('TMDB: ' + e.message); }
     }
@@ -201,21 +239,25 @@
 
   async function enrich(r) {
     let m = { ...r };
-    try {
-      if (r.source === 'tmdb') m = await detailsTMDB(r);
-      else if (r.imdbId && state.settings.tmdbKey.trim()) {
-        // Prefer TMDB's wide backdrops when a key is available.
-        const f = await tmdbFetch(`/find/${r.imdbId}`, { external_source: 'imdb_id' });
-        const hit = (f.movie_results || [])[0];
-        if (hit) m = await detailsTMDB({ ...r, tmdbId: hit.id, poster: r.poster, backdrop: r.backdrop });
-      }
-    } catch { /* keep going with what we have */ }
-    if (m.imdbId && (!m.country || !m.runtime)) {
+    if (m.wikidataId || (m.imdbId && (!m.country || !m.runtime))) {
       try {
-        const w = await wikidataByImdb(m.imdbId);
-        m.country = m.country || w.country; m.runtime = m.runtime || w.runtime; m.year = m.year || w.year;
+        const w = await wikidataFacts({ qid: m.wikidataId, imdbId: m.imdbId });
+        m.country = m.country || w.country || ''; m.runtime = m.runtime || w.runtime || '';
+        m.year = m.year || w.year || ''; m.imdbId = m.imdbId || w.imdbId || '';
       } catch { /* optional */ }
     }
+    try {
+      if (r.source === 'tmdb') m = { ...m, ...(await detailsTMDB(r)) };
+      else if (m.imdbId && state.settings.tmdbKey.trim()) {
+        // With a TMDB key, swap in wide HD backdrops.
+        const f = await tmdbFetch(`/find/${m.imdbId}`, { external_source: 'imdb_id' });
+        const hit = (f.movie_results || [])[0];
+        if (hit) {
+          const t = await detailsTMDB({ ...m, tmdbId: hit.id });
+          m = { ...m, backdrop: t.backdrop || m.backdrop, poster: m.poster || t.poster, country: m.country || t.country, runtime: m.runtime || t.runtime };
+        }
+      }
+    } catch { /* keep going with what we have */ }
     return m;
   }
 
@@ -223,7 +265,7 @@
     const movie = {
       id: uid(), title: m.title || 'Untitled', year: m.year || '', country: m.country || '',
       poster: m.poster || '', backdrop: m.backdrop || m.poster || '', runtime: m.runtime ? Number(m.runtime) : '',
-      imdbId: m.imdbId || '', type: m.type || '', done: false, doneAt: '', addedAt: new Date().toISOString(),
+      imdbId: m.imdbId || '', wikiUrl: m.wikiUrl || '', type: m.type || '', done: false, doneAt: '', addedAt: new Date().toISOString(),
     };
     state.movies.push(movie); save(); render();
     toast(`Added “${movie.title}”`);
@@ -303,6 +345,7 @@
       ${m.year ? `<span class="chip">📅 ${esc(m.year)}</span>` : ''}
       ${m.country ? `<span class="chip">🌍 ${esc(m.country)}</span>` : ''}
       ${m.runtime ? `<span class="chip">⏱ ${fmtHM(m.runtime)}</span>` : ''}
+      ${m.wikiUrl ? `<a class="chip" href="${esc(m.wikiUrl)}" target="_blank" rel="noopener">W Wikipedia ↗</a>` : ''}
     </div>`;
   }
   function progressBar(m) {
@@ -332,7 +375,7 @@
     if (m) {
       html += `<div class="card hero">
         <div class="hero-bg" style="background-image:url('${esc((m.backdrop || m.poster || '').replace(/'/g, '%27'))}')"></div>
-        <div class="hero-content">${posterImg(m)}
+        <div class="hero-content"><button class="poster-btn" data-act="view-poster" data-id="${m.id}" aria-label="View poster">${posterImg(m)}</button>
           <div class="grow"><div class="now-badge">Now watching</div><h3>${esc(m.title)}</h3>${metaChips(m)}${progressBar(m)}</div>
         </div></div>`;
     } else {
@@ -499,7 +542,7 @@
         <input id="set-min" type="number" min="5" max="180" value="${sessionLen()}">
         <label for="set-tmdb">TMDB API key (optional)</label>
         <input id="set-tmdb" type="text" placeholder="Paste your TMDB key for HD wallpapers" value="${esc(state.settings.tmdbKey)}" autocomplete="off">
-        <p class="small muted">Without a key, the app searches IMDb suggestions for posters and Wikidata for country &amp; runtime. A free key from <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">themoviedb.org</a> adds wide HD backdrops.</p>
+        <p class="small muted">Films are searched on <b>Wikipedia</b> (title, poster from the article) and Wikidata (year, country, runtime). IMDb is used as a backup. A free key from <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">themoviedb.org</a> adds wide HD backdrops.</p>
         <button class="btn primary" data-act="save-settings">Save</button>
       </div>
       <div class="card">
@@ -625,6 +668,13 @@
         break;
       }
       case 'edit': openEdit(id); break;
+      case 'view-poster': {
+        const m = movieById(id); const src = m && (m.poster || m.backdrop); if (!src) break;
+        openModal(`<img class="poster-full" src="${esc(m.backdrop && m.backdrop !== m.poster ? m.poster || m.backdrop : src)}" alt="${esc(m.title)} poster" referrerpolicy="no-referrer">
+          <h2 style="margin-top:12px">${esc(m.title)}</h2>${metaChips(m)}
+          <div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn" data-act="close">Close</button></div>`);
+        break;
+      }
       case 'manual': openEdit(null); break;
       case 'close': closeModal(); break;
       case 'pick': {
